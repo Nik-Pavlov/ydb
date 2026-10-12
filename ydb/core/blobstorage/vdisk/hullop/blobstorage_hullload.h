@@ -127,42 +127,10 @@ namespace NKikimr {
             TThis::Become(&TThis::StateFunc);
         }
 
-        // loaded index to string
-        TString ToString() const {
-            TStringStream str;
-            {
-                str << "LOADER(" << (const void*)this << "): INDEX:";
-                typename TLevelSegment::TMemIterator it(LevelSegment);
-                it.SeekToFirst();
-                while (it.IsValid()) {
-                    str << " " << it.GetKey().ToString();
-                }
-            }
-            {
-                const char *b = LevelSegment->LoadedOutbound.Data();
-                const char *e = b + LevelSegment->LoadedOutbound.Size();
-                const TDiskPart *begin = (const TDiskPart *)b;
-                const TDiskPart *end = (const TDiskPart *)e;
-                str << " OUTBOUND:";
-                if (begin == end)
-                    str << " empty";
-                else {
-                    for (const TDiskPart *i = begin; i != end; i++) {
-                        str << " " << i->ToString();
-                    }
-                }
-            }
-            return str.Str();
-        }
-
         void Finish(const TActorContext &ctx) {
             Y_VERIFY_S(RestToReadIndex == 0 && RestToReadOutbound == 0, VCtx->VDiskLogPrefix);
 
-            if constexpr (std::is_same_v<TKey, TKeyLogoBlob>) {
-                LevelSegment->LoadLinearIndex(LinearIndex);
-            } else {
-                LevelSegment->LoadedIndex.swap(LinearIndex);
-            }
+            LevelSegment->LoadLinearIndex(std::move(LinearIndex));
 
             // add data chunks to ChunksBuilder
             typedef typename TLevelSegment::TMemIterator TMemIterator;

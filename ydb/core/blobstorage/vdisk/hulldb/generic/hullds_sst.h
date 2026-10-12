@@ -9,32 +9,58 @@
 #include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_hullstorageratio.h>
 #include <ydb/core/blobstorage/vdisk/protos/events.pb.h>
 #include <util/generic/set.h>
+#include <variant>
 
 namespace NKikimr {
 
     template <class TKey, class TMemRec>
-    struct TRecIndex : public TThrRefBase {
-        typedef TIndexRecord<TKey, TMemRec> TRec;
+    struct TFlatSstIndex {
+        using TRec = TIndexRecord<TKey, TMemRec>;
 
-        TTrackableVector<TRec> LoadedIndex;
+        TTrackableVector<TRec> Recs;
 
-        TRecIndex(TVDiskContextPtr vctx)
-            : LoadedIndex(TMemoryConsumer(vctx->SstIndex))
+        TFlatSstIndex(TVDiskContextPtr vctx)
+            : Recs(TMemoryConsumer(vctx->SstIndex))
         {}
 
+        static const char* Name() {
+            return "Flat";
+        }
+
         bool IsLoaded() const {
-            return !LoadedIndex.empty();
+            return !Recs.empty();
         }
 
         ui64 Elements() const {
-            Y_DEBUG_ABORT_UNLESS(IsLoaded());
-            return LoadedIndex.size();
+            return Recs.size();
         }
+
+        ui64 MemoryBytes() const {
+            return Recs.capacity() * sizeof(TRec);
+        }
+
+        TKey FirstKey() const {
+            return Recs.front().GetKey();
+        }
+
+        TKey LastKey() const {
+            return Recs.back().GetKey();
+        }
+
+        void Load(TTrackableVector<TRec>&& linearIndex) {
+            Recs = std::move(linearIndex);
+            Recs.shrink_to_fit();
+        }
+
+        void Save(TTrackableVector<TRec>* linearIndex) const {
+            linearIndex->assign(Recs.begin(), Recs.end());
+        }
+
+        class TIterator;
     };
 
-    template <>
-    struct TRecIndex<TKeyLogoBlob, TMemRecLogoBlob> : public TThrRefBase {
-        typedef TIndexRecord<TKeyLogoBlob, TMemRecLogoBlob> TRec;
+    struct TTwoLevelLogoBlobSstIndex {
+        using TRec = TIndexRecord<TKeyLogoBlob, TMemRecLogoBlob>;
 
 #pragma pack(push, 4)
         struct TLogoBlobIdHigh {
@@ -183,21 +209,41 @@ namespace NKikimr {
         TTrackableVector<TRecHigh> IndexHigh;
         TTrackableVector<TRecLow> IndexLow;
 
-        TRecIndex(TVDiskContextPtr vctx)
+        TTwoLevelLogoBlobSstIndex(TVDiskContextPtr vctx)
             : IndexHigh(TMemoryConsumer(vctx->SstIndex))
             , IndexLow(TMemoryConsumer(vctx->SstIndex))
         {}
+
+        static const char* Name() {
+            return "TwoLevel";
+        }
 
         bool IsLoaded() const {
             return !IndexLow.empty();
         }
 
         ui64 Elements() const {
-            Y_DEBUG_ABORT_UNLESS(IsLoaded());
             return IndexLow.size();
         }
 
-        void LoadLinearIndex(const TTrackableVector<TRec>& linearIndex) {
+        ui64 MemoryBytes() const {
+            return IndexHigh.capacity() * sizeof(TRecHigh) + IndexLow.capacity() * sizeof(TRecLow);
+        }
+
+        TKeyLogoBlob FirstKey() const {
+            return MakeKey(IndexHigh.front(), IndexLow.front());
+        }
+
+        TKeyLogoBlob LastKey() const {
+            return MakeKey(IndexHigh.back(), IndexLow.back());
+        }
+
+        static TKeyLogoBlob MakeKey(const TRecHigh& high, const TRecLow& low) {
+            const TLogoBlobIdHigh highKey = high.GetKey();
+            return TKeyLogoBlob(TLogoBlobID(highKey.Raw.X[0], highKey.Raw.X[1], low.GetKey().Raw.X));
+        }
+
+        void Load(TTrackableVector<TRec>&& linearIndex) {
             if (linearIndex.empty()) {
                 return;
             }
@@ -236,7 +282,7 @@ namespace NKikimr {
             IndexHigh.shrink_to_fit();
         }
 
-        void SaveLinearIndex(TTrackableVector<TRec>* linearIndex) const {
+        void Save(TTrackableVector<TRec>* linearIndex) const {
             if (IndexLow.empty()) {
                 return;
             }
@@ -249,10 +295,7 @@ namespace NKikimr {
             const TRecLow* lowRangeEnd = low + high->GetLowRangeEndIndex();
 
             while (low != IndexLow.end()) {
-                auto highKey = high->GetKey();
-                auto lowKey = low->GetKey();
-                TLogoBlobID blobId(highKey.Raw.X[0], highKey.Raw.X[1], lowKey.Raw.X);
-                linearIndex->emplace_back(TKeyLogoBlob(blobId), low->GetMemRec());
+                linearIndex->emplace_back(MakeKey(*high, *low), low->GetMemRec());
 
                 ++low;
                 if (Y_UNLIKELY(low == lowRangeEnd)) {
@@ -263,16 +306,111 @@ namespace NKikimr {
                 }
             }
         }
+
+        class TIterator;
+    };
+
+    // TODO: the entropy-coded LogoBlob form; until it exists the flat record array stands in for it
+    using THuffmanLogoBlobSstIndex = TFlatSstIndex<TKeyLogoBlob, TMemRecLogoBlob>;
+
+    // The LogoBlob index: one of several forms, chosen per SST by VCtx->SstIndexFormPolicy when the index is built.
+    class TLogoBlobSstIndex {
+    public:
+        using TRec = TIndexRecord<TKeyLogoBlob, TMemRecLogoBlob>;
+        using TTwoLevel = TTwoLevelLogoBlobSstIndex;
+        using THuffman = THuffmanLogoBlobSstIndex;
+        using TForms = std::variant<TTwoLevel, THuffman>; // order matches ESstIndexFormPolicy
+
+        class TIterator;
+
+        TLogoBlobSstIndex(TVDiskContextPtr vctx)
+            : VCtx(vctx)
+            , Form(std::in_place_index<0>, vctx)
+        {}
+
+        ESstIndexFormPolicy FormKind() const {
+            return static_cast<ESstIndexFormPolicy>(Form.index());
+        }
+
+        const char* Name() const {
+            return std::visit([](const auto& form) { return form.Name(); }, Form);
+        }
+
+        bool IsLoaded() const {
+            return std::visit([](const auto& form) { return form.IsLoaded(); }, Form);
+        }
+
+        ui64 Elements() const {
+            return std::visit([](const auto& form) { return form.Elements(); }, Form);
+        }
+
+        ui64 MemoryBytes() const {
+            return std::visit([](const auto& form) { return form.MemoryBytes(); }, Form);
+        }
+
+        // called from comparators, hence the switch (see TIterator::Visit)
+        TKeyLogoBlob FirstKey() const {
+            static_assert(std::variant_size_v<TForms> == 2);
+            switch (Form.index()) {
+                case 0:
+                    return std::get<0>(Form).FirstKey();
+                default:
+                    return std::get<1>(Form).FirstKey();
+            }
+        }
+
+        TKeyLogoBlob LastKey() const {
+            static_assert(std::variant_size_v<TForms> == 2);
+            switch (Form.index()) {
+                case 0:
+                    return std::get<0>(Form).LastKey();
+                default:
+                    return std::get<1>(Form).LastKey();
+            }
+        }
+
+        void Load(TTrackableVector<TRec>&& linearIndex) {
+            switch (VCtx->SstIndexFormPolicy) {
+                case ESstIndexFormPolicy::TwoLevel:
+                    Form.emplace<TTwoLevel>(VCtx);
+                    break;
+                case ESstIndexFormPolicy::Huffman:
+                    Form.emplace<THuffman>(VCtx);
+                    break;
+            }
+            std::visit([&](auto& form) { form.Load(std::move(linearIndex)); }, Form);
+        }
+
+        void Save(TTrackableVector<TRec>* linearIndex) const {
+            std::visit([&](const auto& form) { form.Save(linearIndex); }, Form);
+        }
+
+    private:
+        const TVDiskContextPtr VCtx;
+        TForms Form;
+    };
+
+    // Which index an SST of the given key type keeps in memory: the flat array for everything but LogoBlobs.
+    template <class TKey, class TMemRec>
+    struct TSstIndexTraits {
+        using TIndex = TFlatSstIndex<TKey, TMemRec>;
+    };
+
+    template <>
+    struct TSstIndexTraits<TKeyLogoBlob, TMemRecLogoBlob> {
+        using TIndex = TLogoBlobSstIndex;
     };
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // TLevelSegment
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     template <class TKey, class TMemRec>
-    struct TLevelSegment : public TRecIndex<TKey, TMemRec> {
+    struct TLevelSegment : public TThrRefBase {
         typedef TLevelSegment<TKey, TMemRec> TThis;
         using TKeyType = TKey;
         using TMemRecType = TMemRec;
+        using TRec = TIndexRecord<TKey, TMemRec>;
+        using TIndex = typename TSstIndexTraits<TKey, TMemRec>::TIndex;
         struct TLevelSstPtr {
             ui32 Level = 0;
             TIntrusivePtr<TThis> SstPtr;
@@ -310,6 +448,7 @@ namespace NKikimr {
             }
         };
 
+        TIndex Index; // in-memory index
         TDiskPart LastPartAddr; // tail of reverted list of parts (on disk)
         TTrackableVector<TDiskPart> LoadedOutbound;
         TIdxDiskPlaceHolder::TInfo Info;
@@ -323,7 +462,7 @@ namespace NKikimr {
         ui64 VolatileOrderId = 0;
 
         TLevelSegment(TVDiskContextPtr vctx)
-            : TRecIndex<TKey, TMemRec>(vctx)
+            : Index(vctx)
             , LastPartAddr()
             , LoadedOutbound(TMemoryConsumer(vctx->SstIndex))
             , Info()
@@ -332,7 +471,7 @@ namespace NKikimr {
         {}
 
         TLevelSegment(TVDiskContextPtr vctx, const TDiskPart &addr)
-            : TRecIndex<TKey, TMemRec>(vctx)
+            : Index(vctx)
             , LastPartAddr(addr)
             , LoadedOutbound(TMemoryConsumer(vctx->SstIndex))
             , Info()
@@ -343,7 +482,7 @@ namespace NKikimr {
         }
 
         TLevelSegment(TVDiskContextPtr vctx, const NKikimrVDiskData::TDiskPart &pb)
-            : TRecIndex<TKey, TMemRec>(vctx)
+            : Index(vctx)
             , LastPartAddr(pb)
             , LoadedOutbound(TMemoryConsumer(vctx->SstIndex))
             , Info()
@@ -352,6 +491,36 @@ namespace NKikimr {
         {
             // HeapStripe is not stored: it is derived from chunk ownership by ResolveHeapStripe() once the huge
             // keeper has been recovered
+        }
+
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // In-memory index
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+        bool IsLoaded() const {
+            return Index.IsLoaded();
+        }
+
+        ui64 Elements() const {
+            Y_DEBUG_ABORT_UNLESS(IsLoaded());
+            return Index.Elements();
+        }
+
+        const char* IndexFormName() const {
+            return Index.Name();
+        }
+
+        ui64 IndexMemoryBytes() const {
+            return Index.MemoryBytes();
+        }
+
+        // Builds the in-memory index from the linear (on-disk) record array
+        void LoadLinearIndex(TTrackableVector<TRec>&& linearIndex) {
+            Index.Load(std::move(linearIndex));
+        }
+
+        void SaveLinearIndex(TTrackableVector<TRec>* linearIndex) const {
+            Index.Save(linearIndex);
         }
 
         // A stripe-backed SST is written as a single index part filling its whole stripe, so the stripe extent is
@@ -443,8 +612,15 @@ namespace NKikimr {
 
         ui64 GetFirstLsn() const { return Info.FirstLsn; }
         ui64 GetLastLsn() const { return Info.LastLsn; }
-        TKey FirstKey() const;
-        TKey LastKey() const;
+        TKey FirstKey() const {
+            Y_DEBUG_ABORT_UNLESS(IsLoaded());
+            return Index.FirstKey();
+        }
+
+        TKey LastKey() const {
+            Y_DEBUG_ABORT_UNLESS(IsLoaded());
+            return Index.LastKey();
+        }
 
         // append cur seg chunk ids (index and data) to the vector
         void FillInChunkIds(TVector<ui32> &vec) const {

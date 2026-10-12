@@ -14,7 +14,7 @@ namespace NKikimr {
                         TABLED() {SMALL() {str << level;}}
                         TABLED() {SMALL() {str << Info.FirstLsn << " / " << Info.LastLsn;}}
                         TABLED() {SMALL() {str << Info.IdxTotalSize << " / " << Info.InplaceDataTotalSize << " / "
-                                << Info.HugeDataTotalSize;}}
+                                << Info.HugeDataTotalSize << " [" << IndexFormName() << " " << IndexMemoryBytes() << "]";}}
                         TABLED() {SMALL() {str << Info.Chunks << " / " << Info.IndexParts;}}
                         TABLED() {SMALL() {str << Info.Items << " / " << Info.ItemsWithInplacedData << " / "
                                 << Info.ItemsWithHugeData;}}
