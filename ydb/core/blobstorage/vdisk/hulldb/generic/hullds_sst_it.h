@@ -172,6 +172,79 @@ namespace NKikimr {
     };
 
     ////////////////////////////////////////////////////////////////////////////
+    // THuffmanLogoBlobSstIndex::TIterator
+    //
+    // A position in the coded index and the record there, decoded on every move. Past-the-end is Pos == records,
+    // before-begin is Pos == Max<ui64>() (Prev() from record 0 wraps); both are !Valid(), and Prev() from
+    // past-the-end lands on the last record, as with the other forms.
+    ////////////////////////////////////////////////////////////////////////////
+    class THuffmanLogoBlobSstIndex::TIterator {
+        const TCodedLogoBlobIndex* Coded = nullptr;
+        ui64 Records = 0;
+        ui64 Pos = 0;
+        TKeyLogoBlob Key;
+        TMemRecLogoBlob MemRec;
+
+        void Load() {
+            if (Pos < Records) {
+                Coded->Decode(Pos, &Key, &MemRec);
+            }
+        }
+
+    public:
+        TIterator() = default;
+
+        TIterator(const THuffmanLogoBlobSstIndex* index)
+            : Coded(index->Coded.get())
+            , Records(index->Elements())
+        {}
+
+        bool Valid() const {
+            return Pos < Records;
+        }
+
+        void Next() {
+            Y_DEBUG_ABORT_UNLESS(Valid());
+            ++Pos;
+            Load();
+        }
+
+        void Prev() {
+            --Pos;
+            Load();
+        }
+
+        TKeyLogoBlob GetCurKey() const {
+            Y_DEBUG_ABORT_UNLESS(Valid());
+            return Key;
+        }
+
+        TMemRecLogoBlob GetMemRec() const {
+            Y_DEBUG_ABORT_UNLESS(Valid());
+            return MemRec;
+        }
+
+        void SeekToFirst() {
+            Pos = 0;
+            Load();
+        }
+
+        void SeekToLast() {
+            Pos = Records - 1;
+            Load();
+        }
+
+        void Seek(const TKeyLogoBlob& key) {
+            Pos = Coded ? Coded->LowerBound(key) : 0;
+            Load();
+        }
+
+        bool operator == (const TIterator& it) const {
+            return Pos == it.Pos;
+        }
+    };
+
+    ////////////////////////////////////////////////////////////////////////////
     // TLogoBlobSstIndex::TIterator: the iterator of whichever form the index holds
     ////////////////////////////////////////////////////////////////////////////
     class TLogoBlobSstIndex::TIterator {

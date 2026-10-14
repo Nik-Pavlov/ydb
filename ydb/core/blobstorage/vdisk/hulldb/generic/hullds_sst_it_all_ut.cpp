@@ -300,7 +300,7 @@ namespace NKikimr {
                 ctxs.GetVCtx()->SstIndexFormPolicy = kind;
                 TLogoBlobSstPtr sst(new TLogoBlobSst(ctxs.GetVCtx()));
                 sst->LoadLinearIndex(MakeRecords(ctxs, 100, 1));
-                UNIT_ASSERT(sst->Index.FormKind() == kind);
+                UNIT_ASSERT_VALUES_EQUAL(TString(sst->IndexFormName()), kind == TwoLevel ? "TwoLevel" : "Huffman");
                 UNIT_ASSERT_VALUES_EQUAL(sst->Elements(), 100);
                 UNIT_ASSERT(sst->IsLoaded());
             }
@@ -331,7 +331,8 @@ namespace NKikimr {
                 ctxs.GetVCtx()->SstIndexFormPolicy = Huffman;
                 TLogoBlobSstPtr b(new TLogoBlobSst(ctxs.GetVCtx()));
                 b->LoadLinearIndex(MakeRecords(ctxs, 300, stepPlus));
-                UNIT_ASSERT(a->Index.FormKind() == TwoLevel && b->Index.FormKind() == Huffman);
+                UNIT_ASSERT_VALUES_EQUAL(TString(a->IndexFormName()), "TwoLevel");
+                UNIT_ASSERT_VALUES_EQUAL(TString(b->IndexFormName()), "Huffman");
 
                 UNIT_ASSERT_VALUES_EQUAL(Walk(*a, true), Walk(*b, true));
                 UNIT_ASSERT_VALUES_EQUAL(Walk(*a, false), Walk(*b, false));
@@ -363,21 +364,96 @@ namespace NKikimr {
 
         Y_UNIT_TEST(IteratorEqualityAndCopy) {
             TTestContexts ctxs;
-            TLogoBlobSstPtr sst(new TLogoBlobSst(ctxs.GetVCtx()));
-            sst->LoadLinearIndex(MakeRecords(ctxs, 50, 256));
-            TMemIterator a(sst.Get());
-            a.SeekToFirst();
-            a.Next();
-            TMemIterator b = a;
-            UNIT_ASSERT(a == b);
-            b.Next();
-            UNIT_ASSERT(a != b);
-            a.Next();
-            UNIT_ASSERT(a == b);
-            TMemIterator c(sst.Get());
-            c.Seek(a.GetCurKey());
-            UNIT_ASSERT(a == c);
-            UNIT_ASSERT(!TMemIterator().Valid());
+            for (auto kind : {TwoLevel, Huffman}) {
+                ctxs.GetVCtx()->SstIndexFormPolicy = kind;
+                TLogoBlobSstPtr sst(new TLogoBlobSst(ctxs.GetVCtx()));
+                sst->LoadLinearIndex(MakeRecords(ctxs, 50, 256));
+                TMemIterator a(sst.Get());
+                a.SeekToFirst();
+                a.Next();
+                TMemIterator b = a;
+                UNIT_ASSERT(a == b);
+                b.Next();
+                UNIT_ASSERT(a != b);
+                a.Next();
+                UNIT_ASSERT(a == b);
+                TMemIterator c(sst.Get());
+                c.Seek(a.GetCurKey());
+                UNIT_ASSERT(a == c);
+                UNIT_ASSERT(!TMemIterator().Valid());
+            }
+        }
+
+        // the states other than "at a record" that callers rely on, in every form
+        Y_UNIT_TEST(IteratorEdgeStates) {
+            TTestContexts ctxs;
+            for (auto kind : {TwoLevel, Huffman}) {
+                ctxs.GetVCtx()->SstIndexFormPolicy = kind;
+                TRecs recs = MakeRecords(ctxs, 130, 256);
+                const TString first = recs.front().GetKey().ToString();
+                const TString last = recs.back().GetKey().ToString();
+                TLogoBlobSstPtr sst(new TLogoBlobSst(ctxs.GetVCtx()));
+                sst->LoadLinearIndex(std::move(recs));
+                TMemIterator it(sst.Get());
+
+                // past-the-end, then back to the last record
+                it.Seek(TLogoBlobID(Max<ui64>(), Max<ui32>(), Max<ui32>(), 255, 0, 0));
+                UNIT_ASSERT(!it.Valid());
+                it.Prev();
+                UNIT_ASSERT(it.Valid());
+                UNIT_ASSERT_VALUES_EQUAL(it.GetCurKey().ToString(), last);
+                it.Next();
+                UNIT_ASSERT(!it.Valid());
+                it.Prev();
+                UNIT_ASSERT_VALUES_EQUAL(it.GetCurKey().ToString(), last);
+
+                // before-begin, then sought again
+                it.SeekToFirst();
+                UNIT_ASSERT_VALUES_EQUAL(it.GetCurKey().ToString(), first);
+                it.Prev();
+                UNIT_ASSERT(!it.Valid());
+                it.Seek(TLogoBlobID(0, 0, 0, 0, 0, 0));
+                UNIT_ASSERT_VALUES_EQUAL(it.GetCurKey().ToString(), first);
+
+                // a copy moves on its own
+                TMemIterator copy = it;
+                copy.Next();
+                UNIT_ASSERT_VALUES_EQUAL(it.GetCurKey().ToString(), first);
+                UNIT_ASSERT(copy.Valid() && copy.GetCurKey().ToString() != first);
+            }
+        }
+
+        Y_UNIT_TEST(EmptyIndexInEveryForm) {
+            TTestContexts ctxs;
+            for (auto kind : {TwoLevel, Huffman}) {
+                ctxs.GetVCtx()->SstIndexFormPolicy = kind;
+                TLogoBlobSstPtr sst(new TLogoBlobSst(ctxs.GetVCtx()));
+                sst->LoadLinearIndex(TRecs(TMemoryConsumer(ctxs.GetVCtx()->SstIndex)));
+                UNIT_ASSERT(!sst->IsLoaded());
+                TMemIterator it(sst.Get());
+                it.SeekToFirst();
+                UNIT_ASSERT(!it.Valid());
+                it.Seek(TLogoBlobID(1, 1, 1, 0, 0, 0));
+                UNIT_ASSERT(!it.Valid());
+            }
+        }
+
+        Y_UNIT_TEST(MemoryIsReleasedInEveryForm) {
+            TTestContexts ctxs;
+            auto counter = ctxs.GetVCtx()->SstIndex.GetCounter();
+            for (auto kind : {TwoLevel, Huffman}) {
+                ctxs.GetVCtx()->SstIndexFormPolicy = kind;
+                TRecs recs = MakeRecords(ctxs, 1000, 3);
+                const i64 linearBytes = recs.capacity() * sizeof(TLogoBlobSst::TRec);
+                const i64 before = counter->Val();
+                {
+                    TLogoBlobSstPtr sst(new TLogoBlobSst(ctxs.GetVCtx()));
+                    sst->LoadLinearIndex(std::move(recs));
+                    // the linear input has been freed, the form is accounted
+                    UNIT_ASSERT_VALUES_EQUAL(counter->Val() - before + linearBytes, i64(sst->IndexMemoryBytes()));
+                }
+                UNIT_ASSERT_VALUES_EQUAL(counter->Val() - before, -linearBytes);
+            }
         }
 
         Y_UNIT_TEST(SaveLinearIndexRoundTripsBothForms) {

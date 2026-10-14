@@ -8,6 +8,7 @@
 #include <ydb/core/blobstorage/vdisk/hulldb/base/hullbase_rec.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_hullstorageratio.h>
 #include <ydb/core/blobstorage/vdisk/protos/events.pb.h>
+#include "hullds_sst_coded.h"
 #include <util/generic/set.h>
 #include <variant>
 
@@ -47,7 +48,7 @@ namespace NKikimr {
             return Recs.back().GetKey();
         }
 
-        void Load(TTrackableVector<TRec>&& linearIndex) {
+        void Load(TTrackableVector<TRec> linearIndex) {
             Recs = std::move(linearIndex);
             Recs.shrink_to_fit();
         }
@@ -243,7 +244,7 @@ namespace NKikimr {
             return TKeyLogoBlob(TLogoBlobID(highKey.Raw.X[0], highKey.Raw.X[1], low.GetKey().Raw.X));
         }
 
-        void Load(TTrackableVector<TRec>&& linearIndex) {
+        void Load(TTrackableVector<TRec> linearIndex) {
             if (linearIndex.empty()) {
                 return;
             }
@@ -310,8 +311,59 @@ namespace NKikimr {
         class TIterator;
     };
 
-    // TODO: the entropy-coded LogoBlob form; until it exists the flat record array stands in for it
-    using THuffmanLogoBlobSstIndex = TFlatSstIndex<TKeyLogoBlob, TMemRecLogoBlob>;
+    // The entropy-coded LogoBlob form (TCodedLogoBlobIndex). The coded index lives on the heap: its code tables take
+    // kilobytes, which every SST would otherwise pay inside the TLogoBlobSstIndex variant, whatever form it holds.
+    class THuffmanLogoBlobSstIndex {
+    public:
+        using TRec = TIndexRecord<TKeyLogoBlob, TMemRecLogoBlob>;
+
+        THuffmanLogoBlobSstIndex(TVDiskContextPtr vctx)
+            : Consumer(vctx->SstIndex)
+        {}
+
+        static const char* Name() {
+            return "Huffman";
+        }
+
+        bool IsLoaded() const {
+            return bool(Coded);
+        }
+
+        ui64 Elements() const {
+            return Coded ? Coded->GetRecords() : 0;
+        }
+
+        ui64 MemoryBytes() const {
+            return Coded ? Coded->GetBytes() : 0;
+        }
+
+        TKeyLogoBlob FirstKey() const {
+            return Coded->FirstKey();
+        }
+
+        TKeyLogoBlob LastKey() const {
+            return Coded->LastKey();
+        }
+
+        void Load(TTrackableVector<TRec> linearIndex) {
+            if (linearIndex.empty()) {
+                return;
+            }
+            Coded = std::make_unique<const TCodedLogoBlobIndex>(Consumer, linearIndex);
+        }
+
+        void Save(TTrackableVector<TRec>* linearIndex) const {
+            if (Coded) {
+                Coded->SaveLinearIndex(linearIndex);
+            }
+        }
+
+        class TIterator;
+
+    private:
+        TMemoryConsumer Consumer;
+        std::unique_ptr<const TCodedLogoBlobIndex> Coded;
+    };
 
     // The LogoBlob index: one of several forms, chosen per SST by VCtx->SstIndexFormPolicy when the index is built.
     class TLogoBlobSstIndex {
@@ -327,10 +379,6 @@ namespace NKikimr {
             : VCtx(vctx)
             , Form(std::in_place_index<0>, vctx)
         {}
-
-        ESstIndexFormPolicy FormKind() const {
-            return static_cast<ESstIndexFormPolicy>(Form.index());
-        }
 
         const char* Name() const {
             return std::visit([](const auto& form) { return form.Name(); }, Form);
@@ -369,7 +417,7 @@ namespace NKikimr {
             }
         }
 
-        void Load(TTrackableVector<TRec>&& linearIndex) {
+        void Load(TTrackableVector<TRec> linearIndex) {
             switch (VCtx->SstIndexFormPolicy) {
                 case ESstIndexFormPolicy::TwoLevel:
                     Form.emplace<TTwoLevel>(VCtx);
@@ -493,10 +541,6 @@ namespace NKikimr {
             // keeper has been recovered
         }
 
-        ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        // In-memory index
-        ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
         bool IsLoaded() const {
             return Index.IsLoaded();
         }
@@ -515,7 +559,7 @@ namespace NKikimr {
         }
 
         // Builds the in-memory index from the linear (on-disk) record array
-        void LoadLinearIndex(TTrackableVector<TRec>&& linearIndex) {
+        void LoadLinearIndex(TTrackableVector<TRec> linearIndex) {
             Index.Load(std::move(linearIndex));
         }
 
