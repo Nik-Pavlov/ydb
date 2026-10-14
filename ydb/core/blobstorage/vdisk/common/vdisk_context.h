@@ -35,6 +35,11 @@ namespace NKikimr {
     /////////////////////////////////////////////////////////////////////////////////////////
     // TVDiskContext
     /////////////////////////////////////////////////////////////////////////////////////////
+    enum class ESstIndexFormPolicy : ui32 {
+        TwoLevel = 0,
+        Huffman = 1,
+    };
+
     class TVDiskContext : public TBSProxyContext {
     public:
         // ActorId of the main VDisk actor (currently ActorId of SkeletonFront)
@@ -81,6 +86,10 @@ namespace NKikimr {
 
         // response status
         std::shared_ptr<NMonGroup::TResponseStatusGroup> ResponseStatusMonGroup;
+
+        // Which in-memory form a LogoBlob SST index takes when it is built from the on-disk record array.
+        // Read at every SST load, so a change takes effect after restart.
+        ESstIndexFormPolicy SstIndexFormPolicy = ESstIndexFormPolicy::TwoLevel;
 
     private:
         // Managing disk space
