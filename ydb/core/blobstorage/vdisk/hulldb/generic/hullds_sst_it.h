@@ -76,7 +76,8 @@ namespace NKikimr {
     class TLogoBlobSstIndex::TIterator {
         using TIterators = std::variant<
             TTwoLevelLogoBlobSstIndex::TIterator,
-            TCodedLogoBlobIndex::TIterator>;
+            TCodedLogoBlobIndex::TIterator,
+            TPackedLogoBlobSstIndex::TIterator>;
 
         TIterators It; // default: an iterator over no index, i.e. invalid
 
@@ -85,22 +86,28 @@ namespace NKikimr {
         // constructor throws), and with Y_ASSUME saying so the compiler tests the stored index once, with no throw path.
         template <class TFunc>
         decltype(auto) Visit(TFunc&& f) const {
-            static_assert(std::variant_size_v<TIterators> == 2);
-            Y_ASSUME(std::get_if<0>(&It) || std::get_if<1>(&It));
+            static_assert(std::variant_size_v<TIterators> == 3);
+            Y_ASSUME(std::get_if<0>(&It) || std::get_if<1>(&It) || std::get_if<2>(&It));
             if (const auto* it = std::get_if<0>(&It)) {
                 return f(*it);
             }
-            return f(*std::get_if<1>(&It));
+            if (const auto* it = std::get_if<1>(&It)) {
+                return f(*it);
+            }
+            return f(*std::get_if<2>(&It));
         }
 
         template <class TFunc>
         decltype(auto) Visit(TFunc&& f) {
-            static_assert(std::variant_size_v<TIterators> == 2);
-            Y_ASSUME(std::get_if<0>(&It) || std::get_if<1>(&It));
+            static_assert(std::variant_size_v<TIterators> == 3);
+            Y_ASSUME(std::get_if<0>(&It) || std::get_if<1>(&It) || std::get_if<2>(&It));
             if (auto* it = std::get_if<0>(&It)) {
                 return f(*it);
             }
-            return f(*std::get_if<1>(&It));
+            if (auto* it = std::get_if<1>(&It)) {
+                return f(*it);
+            }
+            return f(*std::get_if<2>(&It));
         }
 
     public:

@@ -301,7 +301,8 @@ namespace NKikimr {
         using TRecs = TTrackableVector<TLogoBlobSst::TRec>;
         constexpr auto TwoLevel = ESstIndexFormPolicy::TwoLevel;
         constexpr auto Huffman = ESstIndexFormPolicy::Huffman;
-        constexpr std::initializer_list<ESstIndexFormPolicy> AllForms = {TwoLevel, Huffman};
+        constexpr auto Packed = ESstIndexFormPolicy::Packed;
+        constexpr std::initializer_list<ESstIndexFormPolicy> AllForms = {TwoLevel, Huffman, Packed};
 
         // Group boundaries vary generation, channel and tablet; steps have gaps within each group.
         TRecs MakeRecords(TTestContexts& ctxs, ui32 count, ui32 recordsPerGroup) {
@@ -357,8 +358,8 @@ namespace NKikimr {
 
         Y_UNIT_TEST(FormsIterateIdentically) {
             TTestContexts ctxs;
-            for (auto kind : {Huffman}) {
-                // One group, groups crossing block boundaries, and one record per group.
+            for (auto kind : {Huffman, Packed}) {
+                // One group, groups crossing packed-frame boundaries, and one record per group.
                 for (ui32 recordsPerGroup : {300u, 37u, 1u}) {
                     const TRecs recs = MakeRecords(ctxs, 300, recordsPerGroup);
                     ctxs.GetVCtx()->SstIndexFormPolicy = TwoLevel;

@@ -7,7 +7,7 @@
 
 #include <util/random/fast.h>
 
-// Test data and checks for the coded LogoBlob SST index form
+// Test data and checks shared by the coded and packed LogoBlob SST index forms
 namespace NKikimr::NSstIndexTest {
 
     namespace {

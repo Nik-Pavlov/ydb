@@ -36,6 +36,8 @@ SRCS(
     hullds_sst_indexhigh.cpp
     hullds_sst_indexhigh.h
     hullds_sst_it.h
+    hullds_sst_packed.cpp
+    hullds_sst_packed.h
     hullds_sst_twolevel.h
     hullds_sstslice.cpp
     hullds_sstslice.h

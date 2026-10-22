@@ -18,6 +18,7 @@ SRCS(
     hullds_sst_codec_ut.cpp
     hullds_sst_coded_ut.cpp
     hullds_sst_it_all_ut.cpp
+    hullds_sst_packed_ut.cpp
     blobstorage_hullwritesst_ut.cpp
     blobstorage_hullwritesst_estimate_ut.cpp
     blobstorage_hullwritesst_space_model_ut.cpp

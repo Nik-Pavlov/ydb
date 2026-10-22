@@ -10,6 +10,7 @@
 #include <ydb/core/blobstorage/vdisk/protos/events.pb.h>
 #include "hullds_sst_twolevel.h"
 #include "hullds_sst_coded.h"
+#include "hullds_sst_packed.h"
 #include <util/generic/set.h>
 #include <variant>
 
@@ -58,7 +59,8 @@ namespace NKikimr {
     public:
         using TRec = TIndexRecord<TKeyLogoBlob, TMemRecLogoBlob>;
         // order matches ESstIndexFormPolicy
-        using TForms = std::variant<const TTwoLevelLogoBlobSstIndex, const TCodedLogoBlobIndex>;
+        using TForms = std::variant<const TTwoLevelLogoBlobSstIndex, const TCodedLogoBlobIndex,
+            const TPackedLogoBlobSstIndex>;
 
         class TIterator;
 
@@ -89,10 +91,12 @@ namespace NKikimr {
         void Load(TTrackableVector<TRec> linearIndex) {
             Y_ABORT_UNLESS(!IsLoaded(), "SST index is loaded twice");
 
-            // The coded form cannot be empty, so an empty index is two-level whatever the policy;
+            // The coded forms cannot be empty, so an empty index is two-level whatever the policy;
             // SST is not expected to have no records anyway.
             if (Policy == ESstIndexFormPolicy::Huffman && !linearIndex.empty()) {
                 Form.emplace<const TCodedLogoBlobIndex>(Consumer, linearIndex);
+            } else if (Policy == ESstIndexFormPolicy::Packed && !linearIndex.empty()) {
+                Form.emplace<const TPackedLogoBlobSstIndex>(Consumer, linearIndex);
             } else {
                 Form.emplace<const TTwoLevelLogoBlobSstIndex>(Consumer, linearIndex);
             }

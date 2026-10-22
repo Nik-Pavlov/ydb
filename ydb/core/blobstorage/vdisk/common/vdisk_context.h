@@ -38,6 +38,7 @@ namespace NKikimr {
     enum class ESstIndexFormPolicy : ui32 {
         TwoLevel = 0,
         Huffman = 1,
+        Packed = 2,
     };
 
     class TVDiskContext : public TBSProxyContext {
