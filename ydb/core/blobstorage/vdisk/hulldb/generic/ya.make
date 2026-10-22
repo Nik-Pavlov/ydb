@@ -31,6 +31,8 @@ SRCS(
     hullds_sst_bitstream.h
     hullds_sst_codec.cpp
     hullds_sst_codec.h
+    hullds_sst_coded.cpp
+    hullds_sst_coded.h
     hullds_sst_indexhigh.cpp
     hullds_sst_indexhigh.h
     hullds_sst_it.h

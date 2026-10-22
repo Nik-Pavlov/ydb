@@ -9,6 +9,7 @@
 #include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_hullstorageratio.h>
 #include <ydb/core/blobstorage/vdisk/protos/events.pb.h>
 #include "hullds_sst_twolevel.h"
+#include "hullds_sst_coded.h"
 #include <util/generic/set.h>
 #include <variant>
 
@@ -52,16 +53,18 @@ namespace NKikimr {
         class TIterator;
     };
 
-    // The LogoBlob index in one of its in-memory forms; the two-level one is the only form so far.
+    // The LogoBlob index in the form VCtx->SstIndexFormPolicy selected when the SST was created.
     class TLogoBlobSstIndex {
     public:
         using TRec = TIndexRecord<TKeyLogoBlob, TMemRecLogoBlob>;
-        using TForms = std::variant<const TTwoLevelLogoBlobSstIndex>;
+        // order matches ESstIndexFormPolicy
+        using TForms = std::variant<const TTwoLevelLogoBlobSstIndex, const TCodedLogoBlobIndex>;
 
         class TIterator;
 
         TLogoBlobSstIndex(TVDiskContextPtr vctx)
             : Consumer(vctx->SstIndex)
+            , Policy(vctx->SstIndexFormPolicy)
             , Form(std::in_place_type<const TTwoLevelLogoBlobSstIndex>, Consumer, TTrackableVector<TRec>(TMemoryConsumer(Consumer)))
         {}
 
@@ -85,7 +88,14 @@ namespace NKikimr {
         // TIterator binds to the form, and a later Load would destroy that form under it.
         void Load(TTrackableVector<TRec> linearIndex) {
             Y_ABORT_UNLESS(!IsLoaded(), "SST index is loaded twice");
-            Form.emplace<const TTwoLevelLogoBlobSstIndex>(Consumer, linearIndex);
+
+            // The coded form cannot be empty, so an empty index is two-level whatever the policy;
+            // SST is not expected to have no records anyway.
+            if (Policy == ESstIndexFormPolicy::Huffman && !linearIndex.empty()) {
+                Form.emplace<const TCodedLogoBlobIndex>(Consumer, linearIndex);
+            } else {
+                Form.emplace<const TTwoLevelLogoBlobSstIndex>(Consumer, linearIndex);
+            }
         }
 
         void Save(TTrackableVector<TRec>* linearIndex) const {
@@ -94,6 +104,7 @@ namespace NKikimr {
 
     private:
         const TMemoryConsumer Consumer;
+        const ESstIndexFormPolicy Policy;
         TForms Form;
     };
 

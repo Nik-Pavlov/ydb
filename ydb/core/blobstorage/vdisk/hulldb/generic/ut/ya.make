@@ -16,6 +16,7 @@ PEERDIR(
 SRCS(
     hullds_sst_bitstream_ut.cpp
     hullds_sst_codec_ut.cpp
+    hullds_sst_coded_ut.cpp
     hullds_sst_it_all_ut.cpp
     blobstorage_hullwritesst_ut.cpp
     blobstorage_hullwritesst_estimate_ut.cpp

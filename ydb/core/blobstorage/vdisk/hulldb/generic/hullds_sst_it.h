@@ -74,21 +74,33 @@ namespace NKikimr {
     // TLogoBlobSstIndex::TIterator: the iterator of whichever form the index holds
     ////////////////////////////////////////////////////////////////////////////
     class TLogoBlobSstIndex::TIterator {
-        using TIterators = std::variant<TTwoLevelLogoBlobSstIndex::TIterator>;
+        using TIterators = std::variant<
+            TTwoLevelLogoBlobSstIndex::TIterator,
+            TCodedLogoBlobIndex::TIterator>;
 
         TIterators It; // default: an iterator over no index, i.e. invalid
 
-        // calls f with the iterator the variant holds
+        // Not std::visit: libc++ dispatches through a function-pointer table that the compiler does not always fold
+        // away (4x slower scans in a benchmark). Not std::get either: the variant is never valueless (no iterator
+        // constructor throws), and with Y_ASSUME saying so the compiler tests the stored index once, with no throw path.
         template <class TFunc>
         decltype(auto) Visit(TFunc&& f) const {
-            static_assert(std::variant_size_v<TIterators> == 1);
-            return f(*std::get_if<0>(&It));
+            static_assert(std::variant_size_v<TIterators> == 2);
+            Y_ASSUME(std::get_if<0>(&It) || std::get_if<1>(&It));
+            if (const auto* it = std::get_if<0>(&It)) {
+                return f(*it);
+            }
+            return f(*std::get_if<1>(&It));
         }
 
         template <class TFunc>
         decltype(auto) Visit(TFunc&& f) {
-            static_assert(std::variant_size_v<TIterators> == 1);
-            return f(*std::get_if<0>(&It));
+            static_assert(std::variant_size_v<TIterators> == 2);
+            Y_ASSUME(std::get_if<0>(&It) || std::get_if<1>(&It));
+            if (auto* it = std::get_if<0>(&It)) {
+                return f(*it);
+            }
+            return f(*std::get_if<1>(&It));
         }
 
     public:
