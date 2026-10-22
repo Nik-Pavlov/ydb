@@ -133,7 +133,7 @@ namespace NKikimr {
             addRecord(20, 300);
 
             TLogoBlobSstPtr ptr(new TLogoBlobSst(ctxs.GetVCtx()));
-            ptr->LoadLinearIndex(index);
+            ptr->LoadLinearIndex(std::move(index));
 
             TMemIterator it(ptr.Get());
 
@@ -226,12 +226,11 @@ namespace NKikimr {
                 index.emplace_back(TKeyLogoBlob(ids[i]), memRec);
             }
 
-            TLogoBlobSstPtr ptr(new TLogoBlobSst(ctxs.GetVCtx()));
-            ptr->LoadLinearIndex(index);
+            TTwoLevelLogoBlobSstIndex twoLevel(ctxs.GetVCtx()->SstIndex, index);
 
-            using TRecHigh = TLogoBlobSst::TRecHigh;
+            using TRecHigh = TTwoLevelLogoBlobSstIndex::TRecHigh;
 
-            const auto& indexHigh = ptr->IndexHigh;
+            const auto& indexHigh = twoLevel.IndexHigh;
             UNIT_ASSERT_VALUES_EQUAL(indexHigh.size(), 6u);
             auto checkHigh = [&](size_t i, const TLogoBlobID& id, ui32 lowRangeEndIndex) {
                 UNIT_ASSERT(indexHigh[i].SameKey(TRecHigh(id)));
@@ -244,7 +243,7 @@ namespace NKikimr {
             checkHigh(4, ids[8], 9);
             checkHigh(5, ids[9], 10);
 
-            const auto& indexLow = ptr->IndexLow;
+            const auto& indexLow = twoLevel.IndexLow;
             UNIT_ASSERT_VALUES_EQUAL(indexLow.size(), ids.size());
             for (size_t i = 0; i < ids.size(); ++i) {
                 UNIT_ASSERT_VALUES_EQUAL(indexLow[i].Step, ids[i].Step());
@@ -253,7 +252,7 @@ namespace NKikimr {
             }
 
             TTrackableVector<TLogoBlobSst::TRec> checkIndex(TMemoryConsumer(ctxs.GetVCtx()->SstIndex));
-            ptr->SaveLinearIndex(&checkIndex);
+            twoLevel.Save(&checkIndex);
 
             UNIT_ASSERT_VALUES_EQUAL(checkIndex.size(), index.size());
             for (size_t i = 0; i < index.size(); ++i) {
@@ -261,7 +260,7 @@ namespace NKikimr {
             }
 
             // iterator: forward, backward and seek over every key
-            TMemIterator it(ptr.Get());
+            TTwoLevelLogoBlobSstIndex::TIterator it(&twoLevel);
             it.SeekToFirst();
             for (const TLogoBlobID& id : ids) {
                 UNIT_ASSERT(it.Valid());
@@ -294,6 +293,25 @@ namespace NKikimr {
             UNIT_ASSERT_VALUES_EQUAL(it.GetCurKey().LogoBlobID(), ids[0]);
         }
     } // TBlobStorageHullSstIt
+
+    Y_UNIT_TEST_SUITE(TBlobStorageHullSstIndexForms) {
+
+        using namespace NBlobStorageHullSstItHelpers;
+
+        Y_UNIT_TEST(OtherKeysAlwaysUseFlat) {
+            TTestContexts ctxs;
+            using TBlocksSst = TLevelSegment<TKeyBlock, TMemRecBlock>;
+            static_assert(std::is_same_v<TBlocksSst::TIndex, TFlatSstIndex<TKeyBlock, TMemRecBlock>>);
+            TTrackableVector<TBlocksSst::TRec> recs(TMemoryConsumer(ctxs.GetVCtx()->SstIndex));
+            recs.emplace_back(TKeyBlock(1), TMemRecBlock(1));
+            recs.emplace_back(TKeyBlock(2), TMemRecBlock(2));
+            TIntrusivePtr<TBlocksSst> sst(new TBlocksSst(ctxs.GetVCtx()));
+            sst->LoadLinearIndex(std::move(recs));
+            UNIT_ASSERT_VALUES_EQUAL(sst->Elements(), 2);
+            UNIT_ASSERT_VALUES_EQUAL(sst->FirstKey().ToString(), TKeyBlock(1).ToString());
+            UNIT_ASSERT_VALUES_EQUAL(sst->LastKey().ToString(), TKeyBlock(2).ToString());
+        }
+    }
 
     Y_UNIT_TEST_SUITE(TBlobStorageHullOrderedSstsIt) {
 
