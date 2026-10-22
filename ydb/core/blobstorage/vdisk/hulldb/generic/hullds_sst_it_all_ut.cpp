@@ -1,4 +1,5 @@
 #include "hullds_sst_it_all_ut.h"
+#include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_blob.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/hullbase_block.h>
 
 namespace NKikimr {
@@ -310,8 +311,14 @@ namespace NKikimr {
                 const ui32 group = i / recordsPerGroup;
                 TLogoBlobID id(7 + group / 4, 1 + group % 2, 10 + 3 * (i % recordsPerGroup),
                     group / 2 % 2, 100 + i, i % 5);
+                // one local part, as the packed form derives the size from the parts
+                const TBlobStorageGroupType gtype = ctxs.GetVCtx()->Top->GType;
+                NMatrix::TVectorType parts(0, gtype.TotalPartCount());
+                parts.Set(i % gtype.TotalPartCount());
                 TMemRecLogoBlob memRec;
-                memRec.SetDiskBlob(TDiskPart(1, i * 4096, 100 + i));
+                memRec.ReplaceLocalParts(gtype, parts);
+                memRec.SetDiskBlob(TDiskPart(1, i * 4096,
+                    TDiskBlob::CalculateBlobSize(gtype, id, parts, EBlobHeaderMode::XXH3_64BIT_HEADER)));
                 recs.emplace_back(TKeyLogoBlob(id), memRec);
             }
             return recs;

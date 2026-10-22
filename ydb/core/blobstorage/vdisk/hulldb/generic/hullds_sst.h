@@ -64,6 +64,7 @@ namespace NKikimr {
         TLogoBlobSstIndex(TVDiskContextPtr vctx)
             : Consumer(vctx->SstIndex)
             , Policy(vctx->SstIndexFormPolicy)
+            , GType(vctx->Top->GType)
             , Form(std::in_place_type<const TTwoLevelLogoBlobSstIndex>, Consumer, TTrackableVector<TRec>(TMemoryConsumer(Consumer)))
         {}
 
@@ -91,7 +92,7 @@ namespace NKikimr {
             // The packed form cannot be empty, so an empty index is two-level whatever the policy; 
             // SST is not expected to have no records anyway.
             if (Policy == ESstIndexFormPolicy::Packed && !linearIndex.empty()) {
-                Form.emplace<const TPackedLogoBlobSstIndex>(Consumer, linearIndex);
+                Form.emplace<const TPackedLogoBlobSstIndex>(Consumer, GType, linearIndex);
             } else {
                 Form.emplace<const TTwoLevelLogoBlobSstIndex>(Consumer, linearIndex);
             }
@@ -104,6 +105,7 @@ namespace NKikimr {
     private:
         const TMemoryConsumer Consumer;
         const ESstIndexFormPolicy Policy;
+        const TBlobStorageGroupType GType;
         TForms Form;
     };
 

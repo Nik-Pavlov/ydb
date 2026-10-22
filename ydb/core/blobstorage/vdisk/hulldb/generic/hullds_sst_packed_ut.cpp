@@ -10,6 +10,7 @@ namespace NKikimr {
         using TRec = TPackedLogoBlobSstIndex::TRec;
         using TIterator = TPackedLogoBlobSstIndex::TIterator;
         using NSstIndexTest::MakeIndex;
+        using NSstIndexTest::GType;
 
         void ExpectAt(const TIterator& it, const TTrackableVector<TRec>& index, size_t i) {
             UNIT_ASSERT(it.Valid());
@@ -19,8 +20,8 @@ namespace NKikimr {
             UNIT_ASSERT(memcmp(&memRec, &expected, sizeof(memRec)) == 0);
         }
 
-        void CheckIndex(TTestContexts& ctxs, const TTrackableVector<TRec>& index) {
-            const TPackedLogoBlobSstIndex packed(ctxs.GetVCtx()->SstIndex, index);
+        void CheckIndex(TTestContexts& ctxs, const TTrackableVector<TRec>& index, TBlobStorageGroupType gtype = GType) {
+            const TPackedLogoBlobSstIndex packed(ctxs.GetVCtx()->SstIndex, gtype, index);
             UNIT_ASSERT_VALUES_EQUAL(packed.Elements(), index.size());
             UNIT_ASSERT(packed.FirstKey() == index.front().GetKey());
             UNIT_ASSERT(packed.LastKey() == index.back().GetKey());
@@ -73,13 +74,34 @@ namespace NKikimr {
             ExpectAt(it, index, 0);
         }
 
+        // a memrec with `localParts` and their data in one blob
+        TMemRecLogoBlob DiskBlob(const TLogoBlobID& id, std::initializer_list<ui8> localParts, EBlobHeaderMode mode,
+                TBlobStorageGroupType gtype = GType) {
+            NMatrix::TVectorType parts(0, gtype.TotalPartCount());
+            for (ui8 part : localParts) {
+                parts.Set(part);
+            }
+            TMemRecLogoBlob memRec;
+            memRec.ReplaceLocalParts(gtype, parts);
+            memRec.SetDiskBlob(TDiskPart(1, 4096, TDiskBlob::CalculateBlobSize(gtype, id.FullID(), parts, mode)));
+            return memRec;
+        }
+
+        // `memRec` with Size changed by `delta`
+        TMemRecLogoBlob WithSize(TMemRecLogoBlob memRec, i32 delta) {
+            TPackedLogoBlobSstIndex::TMemRecFields fields;
+            memcpy(&fields, &memRec, sizeof(fields));
+            fields.Size += delta;
+            memcpy(&memRec, &fields, sizeof(fields));
+            return memRec;
+        }
+
         // records of one group with the given non-decreasing steps
         TTrackableVector<TRec> MakeGroupIndex(TTestContexts& ctxs, const TVector<ui32>& steps, ui32 tablet = 7) {
             TTrackableVector<TRec> index(TMemoryConsumer(ctxs.GetVCtx()->SstIndex));
             for (ui32 i = 0; i < steps.size(); ++i) {
-                TMemRecLogoBlob memRec;
-                memRec.SetDiskBlob(TDiskPart(1, i * 4096, 100 + i));
-                index.emplace_back(TKeyLogoBlob(TLogoBlobID(tablet, 1, steps[i], 0, 100 + i, i, 1 + i % 5)), memRec);
+                const TLogoBlobID id(tablet, 1, steps[i], 0, 100 + i, i, 1 + i % 5);
+                index.emplace_back(TKeyLogoBlob(id), DiskBlob(id, {ui8(i % 6)}, EBlobHeaderMode::XXH3_64BIT_HEADER));
             }
             return index;
         }
@@ -123,7 +145,7 @@ namespace NKikimr {
                     index.emplace_back(TKeyLogoBlob(TLogoBlobID(tablet, 1, step, 0, 10, 0)), TMemRecLogoBlob());
                 }
             }
-            const TPackedLogoBlobSstIndex packed(ctxs.GetVCtx()->SstIndex, index);
+            const TPackedLogoBlobSstIndex packed(ctxs.GetVCtx()->SstIndex, GType, index);
             TIterator it(&packed);
             // a tablet between two groups: the next group's first record
             it.Seek(TLogoBlobID(15, 1, 1, 0, 10, 0));
@@ -144,8 +166,84 @@ namespace NKikimr {
             TTestContexts ctxs;
             auto index = MakeIndex(ctxs, 500, 7);
             TMemRecLogoBlob memRec = index[100].GetMemRec();
+            memRec.ClearLocalParts(GType);
             memRec.SetDiskBlob(TDiskPart(0, 4096, 0));
             index[100] = TRec(index[100].GetKey(), memRec);
+            CheckIndex(ctxs, index);
+        }
+
+        Y_UNIT_TEST(ExpectedSizes) {
+            const TLogoBlobID id(1, 1, 1, 0, 10000, 0);
+            const ui32 partSize = GType.PartSize(TLogoBlobID(id, 1));
+            auto expected = [&](const TMemRecLogoBlob& memRec) {
+                return TPackedLogoBlobSstIndex::IsSizeExpected(GType, TRec(TKeyLogoBlob(id), memRec));
+            };
+
+            // inline data: the local parts and one header of any mode
+            for (auto mode : {EBlobHeaderMode::XXH3_64BIT_HEADER, EBlobHeaderMode::OLD_HEADER, EBlobHeaderMode::NO_HEADER}) {
+                const TMemRecLogoBlob memRec = DiskBlob(id, {0, 3}, mode);
+                UNIT_ASSERT(expected(memRec));
+                UNIT_ASSERT(!expected(WithSize(memRec, 1)));
+                UNIT_ASSERT(!expected(WithSize(memRec, -1)));
+            }
+            UNIT_ASSERT(!expected(WithSize(DiskBlob(id, {0, 3}, EBlobHeaderMode::NO_HEADER), partSize)));
+
+            // no local parts: no data
+            UNIT_ASSERT(expected(TMemRecLogoBlob()));
+            TMemRecLogoBlob noParts;
+            noParts.SetDiskBlob(TDiskPart(1, 4096, 8));
+            UNIT_ASSERT(!expected(noParts));
+            // local parts without data
+            UNIT_ASSERT(!expected(WithSize(DiskBlob(id, {0}, EBlobHeaderMode::NO_HEADER), -i32(partSize))));
+
+            // a huge blob: one part with its header, whatever the local parts
+            TMemRecLogoBlob huge = DiskBlob(id, {1, 2}, EBlobHeaderMode::NO_HEADER);
+            huge.SetHugeBlob(TDiskPart(5, 0, partSize + 8));
+            UNIT_ASSERT(expected(huge));
+            huge.SetHugeBlob(TDiskPart(5, 0, 2 * partSize + 8));
+            UNIT_ASSERT(!expected(huge));
+
+            // many huge blobs: a part and a header of any mode each
+            TMemRecLogoBlob many;
+            many.SetManyHugeBlobs(0, 3, 3 * partSize + 8 + 5);
+            UNIT_ASSERT(expected(many));
+            many.SetManyHugeBlobs(0, 3, 3 * partSize + 8 + 8 + 8);
+            UNIT_ASSERT(expected(many));
+            many.SetManyHugeBlobs(0, 3, 3 * partSize + 8 * 4);
+            UNIT_ASSERT(!expected(many));
+            many.SetManyHugeBlobs(0, 3, 3 * partSize + 1);
+            UNIT_ASSERT(!expected(many));
+
+            // in-memory data belongs to fresh segments only
+            TMemRecLogoBlob mem;
+            mem.SetMemBlob(1, 100);
+            UNIT_ASSERT(!expected(mem));
+        }
+
+        Y_UNIT_TEST(MetadataPartOnly) {
+            // part 3 of mirror-3of4 has no data: its blob is the header alone
+            TTestContexts ctxs;
+            const TBlobStorageGroupType gtype(TErasureType::ErasureMirror3of4);
+            TTrackableVector<TRec> index(TMemoryConsumer(ctxs.GetVCtx()->SstIndex));
+            for (ui32 i = 0; i < 40; ++i) {
+                const TLogoBlobID id(1, 1, 1 + i, 0, 1000 + i, 0);
+                index.emplace_back(TKeyLogoBlob(id),
+                    DiskBlob(id, {ui8(i % 2 ? 2 : 0), 2}, EBlobHeaderMode::XXH3_64BIT_HEADER, gtype));
+            }
+            UNIT_ASSERT_VALUES_EQUAL(index[1].GetMemRec().DataSize(), 8);
+            CheckIndex(ctxs, index, gtype);
+        }
+
+        Y_UNIT_TEST(CrcModePerRecord) {
+            // part sizes depend on CrcMode, which then has no table by blob size
+            TTestContexts ctxs;
+            TTrackableVector<TRec> index(TMemoryConsumer(ctxs.GetVCtx()->SstIndex));
+            for (ui32 i = 0; i < 40; ++i) {
+                const TLogoBlobID id(1, 1, 1 + i, 0, 1000 + i % 7, 0, 0, i % 2 ? TErasureType::CrcModeWholePart
+                    : TErasureType::CrcModeNone);
+                index.emplace_back(TKeyLogoBlob(id), DiskBlob(id, {ui8(i % 6)}, EBlobHeaderMode::XXH3_64BIT_HEADER));
+            }
+            UNIT_ASSERT(index[0].GetMemRec().DataSize() != index[7].GetMemRec().DataSize());
             CheckIndex(ctxs, index);
         }
 

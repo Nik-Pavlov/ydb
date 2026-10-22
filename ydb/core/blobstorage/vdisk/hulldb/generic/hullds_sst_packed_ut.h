@@ -14,8 +14,17 @@ namespace NKikimr::NSstIndexTest {
 
         const TBlobStorageGroupType GType(TErasureType::Erasure4Plus2Block);
 
+        // a blob header mode as an SST may mix them: mostly the current one
+        EBlobHeaderMode RandomHeaderMode(TReallyFastRng32& rng) {
+            switch (rng() % 8) {
+                case 0: return EBlobHeaderMode::OLD_HEADER;
+                case 1: return EBlobHeaderMode::NO_HEADER;
+                default: return EBlobHeaderMode::XXH3_64BIT_HEADER;
+            }
+        }
+
         // An SST as compaction writes it: groups of steps per (tablet, channel, generation); inline blobs placed one
-        // after another in data chunks, huge blobs in slots, records without data, and a few oddities. A record
+        // after another in data chunks, huge blobs in slots, records without data, and every blob header mode. A record
         // starts a new group with probability 3 / groupSwitch: about 5 records per group by default, the production
         // average of about 500 at groupSwitch = 1500. Ingresses are random 64-bit values, or drawn from
         // `ingressValues` random ones when that is set (production SSTs see a handful of distinct ingresses).
@@ -49,14 +58,15 @@ namespace NKikimr::NSstIndexTest {
                 const ui64 ingress = ingressValues ? ingresses[rng() % ingressValues]
                     : (ui64(rng()) << 32 | rng()) & (rng() % 2 ? 0xFFFF000000000000ull : ~0ull);
                 TMemRecLogoBlob memRec{TIngress(ingress)};
-                const NMatrix::TVectorType parts = TIngress(ingress).LocalParts(GType);
-                const ui32 size = TDiskBlob::CalculateBlobSize(GType, id.FullID(), parts,
-                    rng() % 8 ? EBlobHeaderMode::XXH3_64BIT_HEADER : EBlobHeaderMode::OLD_HEADER)
-                    + (rng() % 50 ? 0 : 1 + rng() % 100);
+                const NMatrix::TVectorType parts = memRec.GetLocalParts(GType);
+                const ui32 partSize = GType.PartSize(TLogoBlobID(id, 1));
                 switch (rng() % 10) {
                     case 0: case 1: case 2:
-                        break; // no data
-                    case 3: case 4: case 5: case 6:
+                        memRec.ClearLocalParts(GType); // no data
+                        break;
+                    case 3: case 4: case 5: case 6: {
+                        const ui32 size = parts.Empty() ? 0
+                            : TDiskBlob::CalculateBlobSize(GType, id.FullID(), parts, RandomHeaderMode(rng));
                         if (dataOffset + size > (128 << 20) || rng() % 200 == 0) {
                             ++dataChunk;
                             dataOffset = rng() % 2 ? 0 : 4096;
@@ -64,18 +74,23 @@ namespace NKikimr::NSstIndexTest {
                         memRec.SetDiskBlob(TDiskPart(dataChunk, dataOffset, size));
                         dataOffset += AlignUp<ui32>(size, 4);
                         break;
-                    case 7: case 8:
+                    }
+                    case 7: case 8: {
+                        const ui32 size = partSize + TDiskBlob::GetBlobHeaderSize(RandomHeaderMode(rng));
                         memRec.SetHugeBlob(TDiskPart(1000 + rng() % 50, (rng() % 300) * (512 << 10), size));
                         break;
-                    default:
-                        if (rng() % 2) {
-                            const ui32 num = 2 + rng() % 3;
-                            memRec.SetManyHugeBlobs(manyHugeIndex, num, size);
-                            manyHugeIndex += num;
-                        } else {
-                            memRec.SetMemBlob(ui64(rng()) << 20 | rng(), size);
+                    }
+                    default: {
+                        // the parts may have been written in different header modes
+                        const ui32 num = 2 + rng() % 3;
+                        ui32 size = 0;
+                        for (ui32 i = 0; i < num; ++i) {
+                            size += partSize + TDiskBlob::GetBlobHeaderSize(RandomHeaderMode(rng));
                         }
+                        memRec.SetManyHugeBlobs(manyHugeIndex, num, size);
+                        manyHugeIndex += num;
                         break;
+                    }
                 }
                 index.emplace_back(TKeyLogoBlob(id), memRec);
             }
