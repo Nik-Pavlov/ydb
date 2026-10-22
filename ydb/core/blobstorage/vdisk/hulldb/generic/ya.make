@@ -28,7 +28,17 @@ SRCS(
     hullds_leveledssts.h
     hullds_sst.cpp
     hullds_sst.h
+    hullds_sst_bitstream.h
+    hullds_sst_codec.cpp
+    hullds_sst_codec.h
+    hullds_sst_coded.cpp
+    hullds_sst_coded.h
+    hullds_sst_indexhigh.cpp
+    hullds_sst_indexhigh.h
     hullds_sst_it.h
+    hullds_sst_packed.cpp
+    hullds_sst_packed.h
+    hullds_sst_twolevel.h
     hullds_sstslice.cpp
     hullds_sstslice.h
     hullds_sstslice_it.h
