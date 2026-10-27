@@ -460,4 +460,6 @@ message TFeatureFlags {
     optional bool EnableComputeSchedulerMemory = 370 [default = true, (RequireRestart) = true];
     optional bool EnableAddColumnGeneratedVirtual = 371 [default = false];
     optional bool EnableAddColumnGeneratedStored = 372 [default = false];
+    // Selects the packed in-memory LogoBlob SST index at VDisk startup; the on-disk format is unchanged.
+    optional bool EnableVDiskPackedSstIndex = 373 [default = false, (RequireRestart) = true];
 }
